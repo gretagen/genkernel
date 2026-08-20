@@ -7,54 +7,34 @@ JOBS="${JOBS:-$(nproc)}"
 DRY_RUN=false
 LOG_FILE="/var/log/kernel_generation.log"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-RESET='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
-info() { echo -e "${CYAN}[INFO]${RESET}  $*" | tee -a "$LOG_FILE"; }
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[OK]${RESET}    $*" | tee -a "$LOG_FILE"; }
-warn() { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
-error() {
-  echo -e "${RED}[ERROR]${RESET} $*" | tee -a "$LOG_FILE"
-  exit 1
-}
-step() { echo -e "\n${BOLD}══ $* ${RESET}" | tee -a "$LOG_FILE"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" | tee -a "$LOG_FILE"; exit 1; }
+step()    { echo -e "\n${BOLD}══ $* ${RESET}" | tee -a "$LOG_FILE"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-  --dry-run)
-    DRY_RUN=true
-    shift
-    ;;
-  --jobs=*)
-    JOBS="${1#*=}"
-    shift
-    ;;
-  --jobs)
-    JOBS="$2"
-    shift 2
-    ;;
-  *) error "Unknown option: $1" ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --jobs=*) JOBS="${1#*=}"; shift ;;
+    --jobs) JOBS="$2"; shift 2 ;;
+    *) error "Unknown option: $1" ;;
   esac
 done
 
 if [ "$EUID" -ne 0 ]; then
-  if command -v doas &>/dev/null; then
-    exec doas "$0" "$@"
-  elif command -v sudo &>/dev/null; then
-    exec sudo "$0" "$@"
-  else
-    error "To proceed with kernel generation, please run this with superuser privileges."
-  fi
+    echo "Generating a kernel requires superuser privileges."
+    exit 1
 fi
 
 mkdir -p "$(dirname "$LOG_FILE")"
-echo "=== Kernel generation started $(date) ===" >>"$LOG_FILE"
+echo "=== Kernel generation started $(date) ===" >> "$LOG_FILE"
 
 info "Genkernel : Custom kernels, made easy."
+
 
 step "Fetching latest stable kernel version"
 LATEST=$(curl -s "https://www.kernel.org/releases.json" | python3 -c "
@@ -72,24 +52,21 @@ CURRENT=$(uname -r)
 
 info "Running: $CURRENT"
 info "Will generate: $LATEST"
-warn "Generating a custom kernel will change your current one."
+warn "Generating a kernel will change your current one."
 
 read -rp "Proceed with kernel generation? (this will switch your kernel on reboot.) [y/N]: " choice
 
 case "$choice" in
-y | Y | yes | YES)
-  echo "genkernel : Proceeding..."
-  ;;
-*)
-  echo "genkernel : Cancelled."
-  exit 0
-  ;;
+    y|Y|yes|YES)
+        echo "genkernel : Proceeding..."
+        ;;
+    *)
+        echo "genkernel : Cancelled."
+        exit 0
+        ;;
 esac
 
-$DRY_RUN && {
-  info "--dry-run: exiting without making changes."
-  exit 0
-}
+$DRY_RUN && { info "--dry-run: exiting without making changes."; exit 0; }
 
 MAJOR="${LATEST%%.*}"
 TARBALL="linux-${LATEST}.tar.xz"
@@ -103,10 +80,10 @@ if [[ -f "$TARBALL" ]]; then
   info "Tarball already present — skipping download."
 else
   info "Downloading from $DOWNLOAD_URL"
-  curl -L --progress-bar -o "$TARBALL" "$DOWNLOAD_URL" ||
-    error "Download failed."
-  file "$TARBALL" | grep -q "XZ compressed" ||
-    error "Downloaded file is not a valid tarball (got $(file "$TARBALL" | cut -d: -f2))."
+  curl -L --progress-bar -o "$TARBALL" "$DOWNLOAD_URL" \
+    || error "Download failed."
+  file "$TARBALL" | grep -q "XZ compressed" \
+    || error "Downloaded file is not a valid tarball (got $(file "$TARBALL" | cut -d: -f2))."
 fi
 
 # GPG signature verification
@@ -121,8 +98,8 @@ if command -v gpg &>/dev/null; then
       curl -s "https://www.kernel.org/keys/kernel.asc" | gpg --import 2>/dev/null || true
     fi
     info "Verifying GPG signature..."
-    gpg --verify "$SIGNATURE" "$TARBALL" 2>/dev/null && success "Signature OK." ||
-      warn "GPG verification failed — continuing anyway."
+    gpg --verify "$SIGNATURE" "$TARBALL" 2>/dev/null && success "Signature OK." \
+      || warn "GPG verification failed — continuing anyway."
   fi
 fi
 
@@ -159,15 +136,15 @@ echo ""
 read -rp "Choice [1/2/3]: " config_choice
 
 case "$config_choice" in
-2)
-  make menuconfig
-  ;;
-3)
-  make tinyconfig
-  ;;
-*)
-  info "Keeping config unchanged."
-  ;;
+  2)
+    make menuconfig
+    ;;
+  3)
+    make tinyconfig
+    ;;
+  *)
+    info "Keeping config unchanged."
+    ;;
 esac
 
 # Apply Zerene OS defaults: disable signing, set localversion
@@ -177,8 +154,8 @@ scripts/config --set-str SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
 scripts/config --disable SYSTEM_REVOCATION_KEYS 2>/dev/null || true
 scripts/config --set-str SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
 
-# Set -defzrn localversion suffix
-scripts/config --set-str CONFIG_LOCALVERSION "-defzrn" 2>/dev/null || true
+# Set -gen localversion suffix
+scripts/config --set-str CONFIG_LOCALVERSION "-gen" 2>/dev/null || true
 # Ensure critical filesystems are built-in
 scripts/config --enable CONFIG_BTRFS_FS 2>/dev/null || true
 scripts/config --enable CONFIG_OVERLAY_FS 2>/dev/null || true
@@ -189,13 +166,13 @@ success "Kernel configured."
 NEW_VERSION=$(make -s kernelrelease 2>/dev/null)
 info "New kernel version: $NEW_VERSION"
 
-step "Compiling kernel (using $JOBS jobs � ☕)"
+step "Compiling kernel (using $JOBS jobs)"
 START_TIME=$SECONDS
 
 make -j"$JOBS" 2>&1 | tee -a "$LOG_FILE" || error "Compilation failed. Check $LOG_FILE"
 
-ELAPSED=$((SECONDS - START_TIME))
-success "Compiled in $((ELAPSED / 60))m $((ELAPSED % 60))s"
+ELAPSED=$(( SECONDS - START_TIME ))
+success "Compiled in $(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
 
 step "Installing modules"
 make modules_install 2>&1 | tee -a "$LOG_FILE" || error "Module install failed."
@@ -205,8 +182,8 @@ if [[ ! -d "/lib/modules/$NEW_VERSION" ]]; then
 fi
 
 step "Installing kernel image to /boot"
-cp -v arch/x86/boot/bzImage /boot/vmlinuz-"$NEW_VERSION" ||
-  error "Failed to copy kernel image to /boot"
+cp -v arch/x86/boot/bzImage /boot/vmlinuz-"$NEW_VERSION" \
+  || error "Failed to copy kernel image to /boot"
 cp -v System.map /boot/System.map-"$NEW_VERSION" 2>/dev/null || true
 cp -v .config /boot/config-"$NEW_VERSION" 2>/dev/null || true
 
@@ -216,22 +193,22 @@ INITRAMFS_DEST="/boot/initramfs-${NEW_VERSION}.img"
 
 # Try distro-specific initramfs generators first
 if command -v mkinitcpio &>/dev/null; then
-  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_DEST" ||
-    error "initramfs generation failed for $NEW_VERSION"
+  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_DEST" \
+    || error "initramfs generation failed for $NEW_VERSION"
 elif command -v dracut &>/dev/null; then
-  dracut --force "$INITRAMFS_DEST" "$NEW_VERSION" ||
-    error "initramfs generation failed for $NEW_VERSION"
+  dracut --force "$INITRAMFS_DEST" "$NEW_VERSION" \
+    || error "initramfs generation failed for $NEW_VERSION"
 elif command -v update-initramfs &>/dev/null; then
-  update-initramfs -u -k "$NEW_VERSION" ||
-    error "initramfs generation failed for $NEW_VERSION"
+  update-initramfs -u -k "$NEW_VERSION" \
+    || error "initramfs generation failed for $NEW_VERSION"
 elif command -v kernel-install &>/dev/null; then
   kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION"
 elif [[ -d /tmp/initramfs_extract ]]; then
   # Custom minimal initramfs rebuild (Zerene OS style)
   info "Rebuilding initramfs from /tmp/initramfs_extract..."
   cd /tmp/initramfs_extract
-  find . | cpio -o -H newc | gzip >"$INITRAMFS_DEST" ||
-    error "initramfs rebuild failed."
+  find . | cpio -o -H newc | gzip > "$INITRAMFS_DEST" \
+    || error "initramfs rebuild failed."
 elif [[ -f /boot/initramfs-${CURRENT}.img ]]; then
   info "Copying current initramfs (kernel-agnostic)..."
   cp /boot/initramfs-${CURRENT}.img "$INITRAMFS_DEST"
@@ -266,10 +243,7 @@ if command -v grub-mkconfig &>/dev/null || command -v update-grub &>/dev/null; t
 
   GRUB_CFG=""
   for p in /boot/grub/grub.cfg /boot/efi/EFI/GRUB/grub.cfg; do
-    [[ -f "$p" ]] && {
-      GRUB_CFG="$p"
-      break
-    }
+    [[ -f "$p" ]] && { GRUB_CFG="$p"; break; }
   done
   [[ -z "$GRUB_CFG" ]] && GRUB_CFG="/boot/grub/grub.cfg"
 
