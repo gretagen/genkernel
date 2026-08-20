@@ -7,45 +7,93 @@ JOBS="${JOBS:-$(nproc)}"
 DRY_RUN=false
 LOG_FILE="/var/log/kernel_generation.log"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
 
-info()    { echo -e "${CYAN}[INFO]${RESET}  $*" | tee -a "$LOG_FILE"; }
+info() { echo -e "${CYAN}[INFO]${RESET}  $*" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[OK]${RESET}    $*" | tee -a "$LOG_FILE"; }
-warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" | tee -a "$LOG_FILE"; exit 1; }
-step()    { echo -e "\n${BOLD}══ $* ${RESET}" | tee -a "$LOG_FILE"; }
+warn() { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
+error() {
+  echo -e "${RED}[ERROR]${RESET} $*" | tee -a "$LOG_FILE"
+  exit 1
+}
+step() { echo -e "\n${BOLD}══ $* ${RESET}" | tee -a "$LOG_FILE"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run) DRY_RUN=true; shift ;;
-    --jobs=*) JOBS="${1#*=}"; shift ;;
-    --jobs) JOBS="$2"; shift 2 ;;
-    *) error "Unknown option: $1" ;;
+  --dry-run)
+    DRY_RUN=true
+    shift
+    ;;
+  --jobs=*)
+    JOBS="${1#*=}"
+    shift
+    ;;
+  --jobs)
+    JOBS="$2"
+    shift 2
+    ;;
+  *) error "Unknown option: $1" ;;
   esac
 done
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Generating a kernel requires superuser privileges."
-    exit 1
+  echo "Generating a kernel requires superuser privileges."
+  exit 1
 fi
 
 mkdir -p "$(dirname "$LOG_FILE")"
-echo "=== Kernel generation started $(date) ===" >> "$LOG_FILE"
+echo "=== Kernel generation started $(date) ===" >>"$LOG_FILE"
 
 info "Genkernel : Custom kernels, made easy."
 
+while true; do
+  echo ""
+  echo -e "${BOLD}Kernel source:${RESET}"
+  echo "  1) stable — latest stable kernel from kernel.org"
+  echo "  2) zen — latest Linux Zen kernel"
+  echo ""
+  read -rp "Choice [1/2]: " kernel_choice
 
-step "Fetching latest stable kernel version"
-LATEST=$(curl -s "https://www.kernel.org/releases.json" | python3 -c "
+  case "$kernel_choice" in
+  1)
+    KERNEL_SOURCE="stable"
+    break
+    ;;
+  2)
+    KERNEL_SOURCE="zen"
+    break
+    ;;
+  *)
+    warn "Invalid choice. Enter 1 or 2."
+    ;;
+  esac
+done
+
+step "Fetching latest $KERNEL_SOURCE kernel version"
+if [[ "$KERNEL_SOURCE" == "zen" ]]; then
+  LATEST=$(curl -s "https://api.github.com/repos/zen-kernel/zen-kernel/tags?per_page=100" | python3 -c "
+import json,re,sys
+for tag in json.load(sys.stdin):
+  name=tag['name']
+  if re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-zen[0-9]+', name):
+    print(name[1:]); break
+") || error "Could not determine latest Linux Zen kernel version."
+else
+  LATEST=$(curl -s "https://www.kernel.org/releases.json" | python3 -c "
 import json,sys
 data=json.load(sys.stdin)
 for r in data['releases']:
   if r['moniker'] == 'stable': print(r['version']); break
-") || error "Could not determine latest kernel version from kernel.org."
+") || error "Could not determine latest stable kernel version from kernel.org."
+fi
 echo "OK"
 
-[[ -z "$LATEST" ]] && error "Failed to parse latest version from kernel.org"
+[[ -z "$LATEST" ]] && error "Failed to parse latest $KERNEL_SOURCE kernel version"
 step "Kernel Information"
 
 CURRENT=$(uname -r)
@@ -57,22 +105,32 @@ warn "Generating a kernel will change your current one."
 read -rp "Proceed with kernel generation? (this will switch your kernel on reboot.) [y/N]: " choice
 
 case "$choice" in
-    y|Y|yes|YES)
-        echo "genkernel : Proceeding..."
-        ;;
-    *)
-        echo "genkernel : Cancelled."
-        exit 0
-        ;;
+y | Y | yes | YES)
+  echo "genkernel : Proceeding..."
+  ;;
+*)
+  echo "genkernel : Cancelled."
+  exit 0
+  ;;
 esac
 
-$DRY_RUN && { info "--dry-run: exiting without making changes."; exit 0; }
+$DRY_RUN && {
+  info "--dry-run: exiting without making changes."
+  exit 0
+}
 
-MAJOR="${LATEST%%.*}"
-TARBALL="linux-${LATEST}.tar.xz"
-SIGNATURE="linux-${LATEST}.tar.sign"
-DOWNLOAD_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
-SIG_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${SIGNATURE}"
+if [[ "$KERNEL_SOURCE" == "zen" ]]; then
+  TARBALL="linux-${LATEST}.tar.gz"
+  SIGNATURE=""
+  DOWNLOAD_URL="https://github.com/zen-kernel/zen-kernel/archive/refs/tags/v${LATEST}.tar.gz"
+  SIG_URL=""
+else
+  MAJOR="${LATEST%%.*}"
+  TARBALL="linux-${LATEST}.tar.xz"
+  SIGNATURE="linux-${LATEST}.tar.sign"
+  DOWNLOAD_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
+  SIG_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${SIGNATURE}"
+fi
 
 cd "$BUILD_DIR"
 
@@ -80,14 +138,14 @@ if [[ -f "$TARBALL" ]]; then
   info "Tarball already present — skipping download."
 else
   info "Downloading from $DOWNLOAD_URL"
-  curl -L --progress-bar -o "$TARBALL" "$DOWNLOAD_URL" \
-    || error "Download failed."
-  file "$TARBALL" | grep -q "XZ compressed" \
-    || error "Downloaded file is not a valid tarball (got $(file "$TARBALL" | cut -d: -f2))."
+  curl -L --progress-bar -o "$TARBALL" "$DOWNLOAD_URL" ||
+    error "Download failed."
+  file "$TARBALL" | grep -Eq "XZ compressed|gzip compressed" ||
+    error "Downloaded file is not a valid tarball (got $(file "$TARBALL" | cut -d: -f2))."
 fi
 
 # GPG signature verification
-if command -v gpg &>/dev/null; then
+if [[ "$KERNEL_SOURCE" == "stable" ]] && command -v gpg &>/dev/null; then
   if [[ ! -f "$SIGNATURE" ]]; then
     info "Downloading GPG signature..."
     curl -L -s -o "$SIGNATURE" "$SIG_URL" || warn "Could not download signature — skipping verification."
@@ -98,8 +156,8 @@ if command -v gpg &>/dev/null; then
       curl -s "https://www.kernel.org/keys/kernel.asc" | gpg --import 2>/dev/null || true
     fi
     info "Verifying GPG signature..."
-    gpg --verify "$SIGNATURE" "$TARBALL" 2>/dev/null && success "Signature OK." \
-      || warn "GPG verification failed — continuing anyway."
+    gpg --verify "$SIGNATURE" "$TARBALL" 2>/dev/null && success "Signature OK." ||
+      warn "GPG verification failed — continuing anyway."
   fi
 fi
 
@@ -110,7 +168,12 @@ if [[ -d "$SRC_DIR" ]]; then
   info "Source directory already exists — skipping extraction."
 else
   info "Extracting (this may take a minute)..."
-  tar -xf "$TARBALL" -C "$BUILD_DIR" || error "Extraction failed."
+  if [[ "$KERNEL_SOURCE" == "zen" ]]; then
+    mkdir -p "$SRC_DIR"
+    tar -xf "$TARBALL" -C "$SRC_DIR" --strip-components=1 || error "Extraction failed."
+  else
+    tar -xf "$TARBALL" -C "$BUILD_DIR" || error "Extraction failed."
+  fi
 fi
 success "Source ready at $SRC_DIR"
 
@@ -136,15 +199,15 @@ echo ""
 read -rp "Choice [1/2/3]: " config_choice
 
 case "$config_choice" in
-  2)
-    make menuconfig
-    ;;
-  3)
-    make tinyconfig
-    ;;
-  *)
-    info "Keeping config unchanged."
-    ;;
+2)
+  make menuconfig
+  ;;
+3)
+  make tinyconfig
+  ;;
+*)
+  info "Keeping config unchanged."
+  ;;
 esac
 
 # Apply Zerene OS defaults: disable signing, set localversion
@@ -171,8 +234,8 @@ START_TIME=$SECONDS
 
 make -j"$JOBS" 2>&1 | tee -a "$LOG_FILE" || error "Compilation failed. Check $LOG_FILE"
 
-ELAPSED=$(( SECONDS - START_TIME ))
-success "Compiled in $(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
+ELAPSED=$((SECONDS - START_TIME))
+success "Compiled in $((ELAPSED / 60))m $((ELAPSED % 60))s"
 
 step "Installing modules"
 make modules_install 2>&1 | tee -a "$LOG_FILE" || error "Module install failed."
@@ -182,8 +245,8 @@ if [[ ! -d "/lib/modules/$NEW_VERSION" ]]; then
 fi
 
 step "Installing kernel image to /boot"
-cp -v arch/x86/boot/bzImage /boot/vmlinuz-"$NEW_VERSION" \
-  || error "Failed to copy kernel image to /boot"
+cp -v arch/x86/boot/bzImage /boot/vmlinuz-"$NEW_VERSION" ||
+  error "Failed to copy kernel image to /boot"
 cp -v System.map /boot/System.map-"$NEW_VERSION" 2>/dev/null || true
 cp -v .config /boot/config-"$NEW_VERSION" 2>/dev/null || true
 
@@ -193,22 +256,22 @@ INITRAMFS_DEST="/boot/initramfs-${NEW_VERSION}.img"
 
 # Try distro-specific initramfs generators first
 if command -v mkinitcpio &>/dev/null; then
-  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_DEST" \
-    || error "initramfs generation failed for $NEW_VERSION"
+  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_DEST" ||
+    error "initramfs generation failed for $NEW_VERSION"
 elif command -v dracut &>/dev/null; then
-  dracut --force "$INITRAMFS_DEST" "$NEW_VERSION" \
-    || error "initramfs generation failed for $NEW_VERSION"
+  dracut --force "$INITRAMFS_DEST" "$NEW_VERSION" ||
+    error "initramfs generation failed for $NEW_VERSION"
 elif command -v update-initramfs &>/dev/null; then
-  update-initramfs -u -k "$NEW_VERSION" \
-    || error "initramfs generation failed for $NEW_VERSION"
+  update-initramfs -u -k "$NEW_VERSION" ||
+    error "initramfs generation failed for $NEW_VERSION"
 elif command -v kernel-install &>/dev/null; then
   kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION"
 elif [[ -d /tmp/initramfs_extract ]]; then
   # Custom minimal initramfs rebuild (Zerene OS style)
   info "Rebuilding initramfs from /tmp/initramfs_extract..."
   cd /tmp/initramfs_extract
-  find . | cpio -o -H newc | gzip > "$INITRAMFS_DEST" \
-    || error "initramfs rebuild failed."
+  find . | cpio -o -H newc | gzip >"$INITRAMFS_DEST" ||
+    error "initramfs rebuild failed."
 elif [[ -f /boot/initramfs-${CURRENT}.img ]]; then
   info "Copying current initramfs (kernel-agnostic)..."
   cp /boot/initramfs-${CURRENT}.img "$INITRAMFS_DEST"
@@ -243,7 +306,10 @@ if command -v grub-mkconfig &>/dev/null || command -v update-grub &>/dev/null; t
 
   GRUB_CFG=""
   for p in /boot/grub/grub.cfg /boot/efi/EFI/GRUB/grub.cfg; do
-    [[ -f "$p" ]] && { GRUB_CFG="$p"; break; }
+    [[ -f "$p" ]] && {
+      GRUB_CFG="$p"
+      break
+    }
   done
   [[ -z "$GRUB_CFG" ]] && GRUB_CFG="/boot/grub/grub.cfg"
 

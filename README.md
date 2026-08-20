@@ -7,8 +7,8 @@ maintainers:
 bin/genkernel.sh
 ```
 
-It downloads the latest stable Linux kernel, applies the ZereneOS defaults,
-builds and installs it, generates an initramfs, and updates the bootloader.
+It downloads the selected Linux kernel, applies the ZereneOS defaults, builds
+and installs it, generates an initramfs, and updates the bootloader.
 
 ## Usage
 
@@ -37,19 +37,18 @@ The following environment variables are supported:
 
 ### 1. Select the kernel
 
-The script queries `https://www.kernel.org/releases.json` and selects the
-release marked as stable. It displays the running and target versions, then
-waits for maintainer confirmation.
+The script prompts the maintainer to choose the kernel to generate. It then
+displays the running and target versions and waits for confirmation.
 
 ### 2. Download the sources
 
-The source archive and detached signature are downloaded from the matching
-`cdn.kernel.org` major-version directory. An existing archive in `BUILD_DIR`
-is reused.
+The selected source archive is downloaded from its upstream source. An existing
+archive in `BUILD_DIR` is reused.
 
-The archive type is validated with `file`. If GPG is installed, the script
-imports the kernel.org signing key when necessary and verifies the signature.
-Signature failure emits a warning but does not stop the build.
+The archive type is validated with `file`. For stable kernels, if GPG is
+installed, the script imports the kernel.org signing key when necessary and
+verifies the signature. Signature failure emits a warning but does not stop the
+build.
 
 ### 3. Configure the kernel
 
@@ -66,7 +65,7 @@ The maintainer can then:
 
 The script subsequently applies the ZereneOS defaults:
 
-- set `CONFIG_LOCALVERSION` to `-defzrn`;
+- set `CONFIG_LOCALVERSION` to `-gen`;
 - disable module signing;
 - clear the trusted and revoked system key settings;
 - build Btrfs support into the kernel;
