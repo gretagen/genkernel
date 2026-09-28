@@ -20,7 +20,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
     --jobs=*) JOBS="${1#*=}"; shift ;;
-    --jobs) JOBS="$2"; shift 2 ;;
+    --jobs)
+      [[ -n "${2:-}" ]] || error "--jobs requires a value."
+      JOBS="$2"; shift 2
+      ;;
+    -h|--help)
+      echo "Usage: genkernel [--dry-run] [--jobs N]"
+      exit 0
+      ;;
     *) error "Unknown option: $1" ;;
   esac
 done
@@ -38,27 +45,38 @@ info "Genkernel : Custom kernels, made easy."
 
 step "Fetching latest kernel versions"
 
-RAW=$(curl -s "https://www.kernel.org/releases.json") \
+RAW=$(curl -fsSL "https://www.kernel.org/releases.json") \
   || error "Could not fetch kernel versions from kernel.org."
+
+# kernel.org pretty-prints releases.json, so the indentation of each line says
+# which object it belongs to. That matters: several values are unquoted JSON
+# scalars (null), which a naive quote-split parser mis-reads as the *next* key.
+PARSED=$(printf '%s\n' "$RAW" | awk '
+  /^        \{/          { moniker=""; version=""; source=""; pgp=""; next }
+  /^        \},?[ \t]*$/ { if (version != "") print moniker "\t" version "\t" source "\t" pgp; next }
+  {
+    line = $0
+    if (line ~ /^            "moniker": *"/) { sub(/^ *"moniker": *"/, "", line); sub(/",? *$/, "", line); moniker = line; next }
+    if (line ~ /^            "version": *"/) { sub(/^ *"version": *"/, "", line); sub(/",? *$/, "", line); version = line; next }
+    if (line ~ /^            "source":/)    { sub(/^ *"source": */, "", line); sub(/,? *$/, "", line); gsub(/"/, "", line); source = line; next }
+    if (line ~ /^            "pgp":/)       { sub(/^ *"pgp": */, "", line); sub(/,? *$/, "", line); gsub(/"/, "", line); pgp = line; next }
+  }
+')
 
 declare -a MONIKERS=()
 declare -a VERSIONS=()
 declare -a SOURCES=()
 declare -a PGPS=()
 while IFS=$'\t' read -r moniker version source pgp; do
-  [[ "$source" == "null" ]] && continue
+  # linux-next carries no prepared source tarball, so it is not offered.
+  if [[ "$source" == "null" || -z "$source" ]]; then
+    continue
+  fi
   MONIKERS+=("$moniker")
   VERSIONS+=("$version")
   SOURCES+=("$source")
   PGPS+=("$pgp")
-done < <(echo "$RAW" | tr -d '\n' | awk -F'"' '{
-  for (i = 1; i <= NF; i++) {
-    if ($i == "moniker") { m = $(i+2) }
-    if ($i == "version" && m != "") { v = $(i+2) }
-    if ($i == "source" && m != "") { s = $(i+2) }
-    if ($i == "pgp" && m != "") { print m "\t" v "\t" s "\t" $(i+2); m = ""; v = ""; s = "" }
-  }
-}')
+done <<< "$PARSED"
 
 [[ ${#VERSIONS[@]} -eq 0 ]] && error "Failed to parse kernel versions from kernel.org."
 
@@ -69,22 +87,25 @@ echo ""
 echo -e "${BOLD}Available kernel versions:${RESET}"
 echo ""
 
-declare -A MAP
 i=1
 for idx in "${!VERSIONS[@]}"; do
   printf "  ${CYAN}%d)${RESET} %-12s (%s)\n" "$i" "${VERSIONS[$idx]}" "${MONIKERS[$idx]}"
-  MAP[$i]="${VERSIONS[$idx]}"
-  ((i++))
+  i=$((i+1))
 done
 
 echo ""
 read -rp "Select version to build [1]: " choice
 choice=${choice:-1}
-LATEST="${MAP[$choice]:-}"
-[[ -z "$LATEST" ]] && error "Invalid selection: $choice"
+
+if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#VERSIONS[@]} )); then
+  error "Invalid selection: $choice"
+fi
+
+# The menu is 1-based; the arrays are 0-based.
+IDX=$(( choice - 1 ))
 
 echo ""
-info "Will generate: $LATEST"
+info "Will generate: ${VERSIONS[$IDX]}"
 warn "Generating a kernel will change your current one."
 read -rp "Proceed? [y/N]: " confirm
 
@@ -95,53 +116,103 @@ esac
 
 $DRY_RUN && { info "--dry-run: exiting without making changes."; exit 0; }
 
-TARBALL="linux-${LATEST}.tar.xz"
-SIGNATURE="linux-${LATEST}.tar.sign"
-DOWNLOAD_URL="${SOURCES[$choice]}"
-SIG_URL="${PGPS[$choice]}"
+LATEST="${VERSIONS[$IDX]}"
+DOWNLOAD_URL="${SOURCES[$IDX]}"
+PGP_URL="${PGPS[$IDX]}"
 
-cd "$BUILD_DIR"
+# Artifact names come from the URLs: mainline ships as a .tar.gz from
+# git.kernel.org, stable/longterm as a .tar.xz from cdn.kernel.org.
+TARBALL="${DOWNLOAD_URL##*/}"
+SIGNED=false
+SIGNATURE=""
+if [[ "$PGP_URL" != "null" && -n "$PGP_URL" ]]; then
+  SIGNATURE="${PGP_URL##*/}"
+  SIGNED=true
+fi
 
-if [[ -f "$TARBALL" ]]; then
-  info "Tarball already present — skipping download."
+# Kernel tarballs unpack into a "linux-<version>" directory.
+SRC_NAME="linux-$LATEST"
+SRC_DIR="$BUILD_DIR/$SRC_NAME"
+
+# Prints the top-level directory of an archive, e.g. "linux-6.18.54", and
+# fails if the archive is not a readable, complete tarball. The whole listing
+# is drained on purpose: that is what makes a truncated download fail here
+# instead of half way through extraction.
+archive_probe() {
+  local first
+  first=$(tar -tf "$1" 2>/dev/null | {
+    IFS= read -r line
+    cat >/dev/null
+    printf '%s' "$line"
+  }) || return 1
+  printf '%s' "${first%%/*}"
+}
+
+# A cached tarball is only reusable if it is intact and really unpacks into
+# the expected source directory. Anything else (truncated, HTML error page,
+# leftover from a different version) is thrown away and fetched again.
+tarball_matches() {
+  local top
+  top=$(archive_probe "$1") || return 1
+  [[ -n "$top" && "$top" == "$2" ]]
+}
+
+cd "$BUILD_DIR" || error "Cannot enter $BUILD_DIR."
+
+if tarball_matches "$TARBALL" "$SRC_NAME"; then
+  info "Tarball already present and valid — skipping download."
 else
+  if [[ -e "$TARBALL" ]]; then
+    warn "Cached $TARBALL is not a usable $SRC_NAME archive — removing it."
+    rm -f "$TARBALL"
+  fi
   info "Downloading from $DOWNLOAD_URL"
   curl -L --progress-bar -o "$TARBALL" "$DOWNLOAD_URL" \
-    || error "Download failed."
-  file "$TARBALL" | grep -q "XZ compressed" \
-    || error "Downloaded file is not a valid tarball (got $(file "$TARBALL" | cut -d: -f2))."
+    || { rm -f "$TARBALL"; error "Download failed."; }
+  tarball_matches "$TARBALL" "$SRC_NAME" \
+    || { rm -f "$TARBALL"; error "Downloaded file is not a valid $SRC_NAME tarball."; }
 fi
 
 # GPG signature verification
-if command -v gpg &>/dev/null; then
-  if [[ ! -f "$SIGNATURE" ]]; then
-    info "Downloading GPG signature..."
-    curl -L -s -o "$SIGNATURE" "$SIG_URL" || warn "Could not download signature — skipping verification."
+if $SIGNED; then
+  info "Downloading GPG signature..."
+  curl -L -fsS -o "$SIGNATURE" "$PGP_URL" \
+    || { rm -f "$SIGNATURE"; error "Could not download signature."; }
+
+  # Work out which key signed the tarball and fetch it when we are missing it.
+  # kernel.org no longer serves a keys page, so this goes via a keyserver.
+  KEYID=$(gpg --list-packets "$SIGNATURE" 2>/dev/null | awk '/keyid/ {print $NF; exit}') || true
+  if [[ -n "$KEYID" ]] && ! gpg --list-keys "$KEYID" >/dev/null 2>&1; then
+    info "Importing signing key $KEYID from keyserver..."
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$KEYID" \
+      | gpg --import 2>&1 | tee -a "$LOG_FILE" \
+      || warn "Could not import signing key — verification will probably fail."
   fi
-  if [[ -f "$SIGNATURE" ]] && [[ -f "$TARBALL" ]]; then
-    if ! gpg --list-keys 2>/dev/null | grep -q 'torvalds'; then
-      warn "Linus's GPG key not in keyring — importing..."
-      curl -s "https://www.kernel.org/keys/kernel.asc" | gpg --import 2>/dev/null || true
-    fi
-    info "Verifying GPG signature..."
-    gpg --verify "$SIGNATURE" "$TARBALL" 2>/dev/null && success "Signature OK." \
-      || warn "GPG verification failed — continuing anyway."
+
+  info "Verifying GPG signature..."
+  if gpg --verify "$SIGNATURE" "$TARBALL" 2>&1 | tee -a "$LOG_FILE"; then
+    success "Signature OK."
+  else
+    warn "GPG verification failed — continuing anyway. See $LOG_FILE for details."
   fi
+else
+  info "No detached signature published for $LATEST — skipping verification."
 fi
 
-step "Extracting linux-$LATEST"
-SRC_DIR="$BUILD_DIR/linux-$LATEST"
+step "Extracting $SRC_DIR"
 
 if [[ -d "$SRC_DIR" ]]; then
   info "Source directory already exists — skipping extraction."
 else
   info "Extracting (this may take a minute)..."
   tar -xf "$TARBALL" -C "$BUILD_DIR" || error "Extraction failed."
+  [[ -d "$SRC_DIR" ]] \
+    || error "Archive did not produce $SRC_DIR (top level: $(archive_probe "$TARBALL"))."
 fi
 success "Source ready at $SRC_DIR"
 
 step "Configure kernel"
-cd "$SRC_DIR"
+cd "$SRC_DIR" || error "Cannot enter $SRC_DIR."
 
 RUNNING_CONFIG="/boot/config-${CURRENT}"
 if [[ -f "$RUNNING_CONFIG" ]]; then
@@ -173,23 +244,21 @@ case "$config_choice" in
     ;;
 esac
 
-# Apply Zerene OS defaults: disable signing, set localversion
+# Apply Haliade OS defaults: disable signing, set localversion
 scripts/config --disable MODULE_SIG_ALL 2>/dev/null || true
 scripts/config --disable SYSTEM_TRUSTED_KEYS 2>/dev/null || true
 scripts/config --set-str SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
 scripts/config --disable SYSTEM_REVOCATION_KEYS 2>/dev/null || true
 scripts/config --set-str SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
-
-# Set localversion suffix based on moniker
-if [[ "${MONIKERS[$choice]}" == *rc* ]]; then
-  LOCALVERSION="-rc-gen"
-else
-  LOCALVERSION="-gen"
-fi
-scripts/config --set-str CONFIG_LOCALVERSION "$LOCALVERSION" 2>/dev/null || true
+scripts/config --set-str CONFIG_LOCALVERSION "-gen" 2>/dev/null || true
 # Ensure critical filesystems are built-in
 scripts/config --enable CONFIG_BTRFS_FS 2>/dev/null || true
 scripts/config --enable CONFIG_OVERLAY_FS 2>/dev/null || true
+
+# scripts/config edits .config directly, so re-run the config machinery to
+# resolve anything it added or invalidated.
+make olddefconfig 2>&1 | tee -a "$LOG_FILE" >/dev/null \
+  || error "Kernel configuration refresh failed."
 
 success "Kernel configured."
 
@@ -235,7 +304,7 @@ elif command -v update-initramfs &>/dev/null; then
 elif command -v kernel-install &>/dev/null; then
   kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION"
 elif [[ -d /tmp/initramfs_extract ]]; then
-  # Custom minimal initramfs rebuild (Zerene OS style)
+  # Custom minimal initramfs rebuild (Haliade OS style)
   info "Rebuilding initramfs from /tmp/initramfs_extract..."
   cd /tmp/initramfs_extract
   find . | cpio -o -H newc | gzip > "$INITRAMFS_DEST" \
@@ -263,7 +332,7 @@ if [[ -f /boot/limine.conf ]]; then
   success "Limine config updated for kernel $NEW_VERSION."
 fi
 
-# GRUB detection/update (fallback for non-Zerene distros)
+# GRUB detection/update (fallback for non-Haliade distros)
 if command -v grub-mkconfig &>/dev/null || command -v update-grub &>/dev/null; then
   GRUB_CMD=""
   if command -v grub-mkconfig &>/dev/null; then
@@ -292,8 +361,9 @@ fi
 step "Cleaning up"
 cd "$BUILD_DIR" 2>/dev/null || true
 rm -rf "$SRC_DIR" 2>/dev/null || warn "Could not remove $SRC_DIR"
-if [[ -n "${TARBALL:-}" ]] && [[ -f "$BUILD_DIR/$TARBALL" ]]; then
-  rm -f "$BUILD_DIR/$TARBALL" "$BUILD_DIR/${TARBALL}.sign" 2>/dev/null || true
+rm -f "$BUILD_DIR/$TARBALL" 2>/dev/null || true
+if $SIGNED; then
+  rm -f "$BUILD_DIR/$SIGNATURE" 2>/dev/null || true
 fi
 
 echo ""

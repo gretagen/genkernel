@@ -1,13 +1,13 @@
-# ZereneOS Genkernel
+# HaliadeOS Genkernel
 
-This repository contains the kernel generation script used by ZereneOS
+This repository contains the kernel generation script used by HaliadeOS
 maintainers:
 
 ```text
-bin/genkernel.sh
+bin/genkernel
 ```
 
-It downloads the selected Linux kernel, applies the ZereneOS defaults, builds
+It downloads the selected Linux kernel, applies the HaliadeOS defaults, builds
 and installs it, generates an initramfs, and updates the bootloader.
 
 ## Usage
@@ -15,7 +15,7 @@ and installs it, generates an initramfs, and updates the bootloader.
 Run the script as root:
 
 ```bash
-sudo bash bin/genkernel.sh
+sudo bin/genkernel
 ```
 
 Options:
@@ -40,15 +40,41 @@ The following environment variables are supported:
 The script prompts the maintainer to choose the kernel to generate. It then
 displays the running and target versions and waits for confirmation.
 
+The menu is built from the kernel.org release feed and lists the mainline
+release candidate, the current stable, and every active longterm series.
+`linux-next` is not offered because kernel.org does not publish a source
+tarball for it.
+
 ### 2. Download the sources
 
-The selected source archive is downloaded from its upstream source. An existing
-archive in `BUILD_DIR` is reused.
+The selected source archive is downloaded from its upstream source. The archive
+name is taken from the URL, so the mainline `.tar.gz` and the stable and
+longterm `.tar.xz` files are all handled without special cases.
 
-The archive type is validated with `file`. For stable kernels, if GPG is
-installed, the script imports the kernel.org signing key when necessary and
-verifies the signature. Signature failure emits a warning but does not stop the
-build.
+An archive already present in `BUILD_DIR` is reused, but only after it is
+confirmed to be a complete tarball that unpacks into the expected
+`linux-<version>` directory. Anything else — a truncated download, an HTML
+error page, or a leftover from a different version — is discarded and fetched
+again.
+
+When a detached signature is published, the script reads the signing key ID out
+of the signature, imports that key from a keyserver if the keyring is missing
+it, and verifies the archive. Signature failure emits a warning and does not
+stop the build; the full GPG output is written to the log.
+
+Mainline release candidates are not signed, so verification is skipped for
+them.
+
+Note that kernel.org's `.tar.sign` files do not always match the tarballs
+currently on the CDN, which makes the signature step report a bad signature
+even for a correctly downloaded archive. To cross-check an archive by hand,
+compare it against kernel.org's signed checksum file:
+
+```bash
+sha256sum linux-6.18.54.tar.xz
+grep linux-6.18.54.tar.xz <(curl -fsSL \
+  https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc)
+```
 
 ### 3. Configure the kernel
 
@@ -63,13 +89,16 @@ The maintainer can then:
 2. run `make menuconfig`;
 3. replace it with `make tinyconfig`.
 
-The script subsequently applies the ZereneOS defaults:
+The script subsequently applies the HaliadeOS defaults:
 
 - set `CONFIG_LOCALVERSION` to `-gen`;
 - disable module signing;
 - clear the trusted and revoked system key settings;
 - build Btrfs support into the kernel;
 - build OverlayFS support into the kernel.
+
+The configuration is refreshed with `make olddefconfig` afterwards so that any
+symbol the script added is resolved by the kernel build system.
 
 ### 4. Build and install
 
@@ -112,8 +141,8 @@ If GRUB tooling is present, the detected `grub.cfg` is backed up with a
 
 ### 7. Clean up
 
-After a successful installation, the extracted source directory and downloaded
-archive are removed from `BUILD_DIR`.
+After a successful installation, the extracted source directory, the downloaded
+archive, and its signature are removed from `BUILD_DIR`.
 
 The system is not rebooted automatically.
 
