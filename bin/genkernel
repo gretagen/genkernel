@@ -109,6 +109,7 @@ info "Will generate: ${VERSIONS[$IDX]}"
 warn "Generating a kernel will change your current one."
 read -rp "Proceed? [y/N]: " confirm
 
+
 case "$confirm" in
   y|Y|yes|YES) ;;
   *) echo "Cancelled."; exit 0 ;;
@@ -215,7 +216,14 @@ step "Configure kernel"
 cd "$SRC_DIR" || error "Cannot enter $SRC_DIR."
 
 RUNNING_CONFIG="/boot/config-${CURRENT}"
-if [[ -f "$RUNNING_CONFIG" ]]; then
+# Inside a chroot of the target rootfs, uname -r (and thus $CURRENT) reports
+# the *host* kernel, whose config is not in the tree — fall back to the
+# newest config present so the target's own configuration is preserved
+# instead of silently starting over from defconfig.
+if [[ ! -f "$RUNNING_CONFIG" ]]; then
+  RUNNING_CONFIG=$(ls -t /boot/config-* 2>/dev/null | head -1 || true)
+fi
+if [[ -n "$RUNNING_CONFIG" && -f "$RUNNING_CONFIG" ]]; then
   info "Basing config on running kernel: $RUNNING_CONFIG"
   cp "$RUNNING_CONFIG" .config
   make olddefconfig
@@ -254,6 +262,9 @@ scripts/config --set-str CONFIG_LOCALVERSION "-gen" 2>/dev/null || true
 # Ensure critical filesystems are built-in
 scripts/config --enable CONFIG_BTRFS_FS 2>/dev/null || true
 scripts/config --enable CONFIG_OVERLAY_FS 2>/dev/null || true
+# GPU display drivers built-in so every TTY renders on every connected
+# display from the earliest boot stage (matches amdgpu/i915 above)
+scripts/config --enable CONFIG_DRM_NOUVEAU 2>/dev/null || true
 
 # scripts/config edits .config directly, so re-run the config machinery to
 # resolve anything it added or invalidated.
@@ -288,48 +299,106 @@ cp -v System.map /boot/System.map-"$NEW_VERSION" 2>/dev/null || true
 cp -v .config /boot/config-"$NEW_VERSION" 2>/dev/null || true
 
 step "Installing initramfs"
-INITRAMFS_SRC=""
 INITRAMFS_DEST="/boot/initramfs-${NEW_VERSION}.img"
+
+[[ -d /boot ]] || error "/boot does not exist — cannot install $INITRAMFS_DEST."
+
+# Generators that take an explicit output path validate it before doing any
+# work, and mkinitcpio's check only tests -w on the target file when that file
+# already exists — it never falls back to the parent directory. A stale image
+# left behind by an earlier run therefore aborts generation even though /boot
+# itself is perfectly writable. Generate under a name that does not exist yet,
+# then move it into place, which also replaces the stale file atomically
+# (same filesystem). Deliberately not /tmp: these images are hundreds of
+# megabytes and /tmp is usually a tmpfs.
+INITRAMFS_TMP="/boot/.initramfs-${NEW_VERSION}.tmp.img"
+
+# Probe /boot by actually creating a file. [[ -w /boot ]] is not good enough
+# here: as root, access(2) reports success even on a read-only mount, so it
+# would wave through the exact failure it is meant to catch.
+rm -f "$INITRAMFS_TMP"
+: > "$INITRAMFS_TMP" 2>/dev/null \
+  || error "/boot is not writable (cannot create $INITRAMFS_TMP) — remount it read-write and retry."
+rm -f "$INITRAMFS_TMP"
 
 # Try distro-specific initramfs generators first
 if command -v mkinitcpio &>/dev/null; then
-  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_DEST" \
-    || error "initramfs generation failed for $NEW_VERSION"
+  mkinitcpio -k "$NEW_VERSION" -g "$INITRAMFS_TMP" \
+    || { rm -f "$INITRAMFS_TMP"; error "initramfs generation failed for $NEW_VERSION"; }
 elif command -v dracut &>/dev/null; then
-  dracut --force "$INITRAMFS_DEST" "$NEW_VERSION" \
-    || error "initramfs generation failed for $NEW_VERSION"
+  dracut --force "$INITRAMFS_TMP" "$NEW_VERSION" \
+    || { rm -f "$INITRAMFS_TMP"; error "initramfs generation failed for $NEW_VERSION"; }
 elif command -v update-initramfs &>/dev/null; then
+  # update-initramfs chooses its own output name (/boot/initrd.img-$ver), so
+  # there is nothing to redirect here.
   update-initramfs -u -k "$NEW_VERSION" \
     || error "initramfs generation failed for $NEW_VERSION"
 elif command -v kernel-install &>/dev/null; then
-  kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION"
+  # Likewise: kernel-install owns the naming.
+  kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION" \
+    || error "initramfs generation failed for $NEW_VERSION"
 elif [[ -d /tmp/initramfs_extract ]]; then
   # Custom minimal initramfs rebuild (Haliade OS style)
   info "Rebuilding initramfs from /tmp/initramfs_extract..."
-  cd /tmp/initramfs_extract
-  find . | cpio -o -H newc | gzip > "$INITRAMFS_DEST" \
-    || error "initramfs rebuild failed."
+  ( cd /tmp/initramfs_extract && find . | cpio -o -H newc | gzip ) > "$INITRAMFS_TMP" \
+    || { rm -f "$INITRAMFS_TMP"; error "initramfs rebuild failed."; }
 elif [[ -f /boot/initramfs-${CURRENT}.img ]]; then
   info "Copying current initramfs (kernel-agnostic)..."
-  cp /boot/initramfs-${CURRENT}.img "$INITRAMFS_DEST"
+  cp /boot/initramfs-${CURRENT}.img "$INITRAMFS_TMP" \
+    || { rm -f "$INITRAMFS_TMP"; error "Could not copy the current initramfs."; }
+fi
+
+# Install whatever the generator produced, replacing any stale image.
+if [[ -e "$INITRAMFS_TMP" ]]; then
+  mv -f "$INITRAMFS_TMP" "$INITRAMFS_DEST" \
+    || error "Could not install $INITRAMFS_DEST"
+fi
+
+if [[ -e "$INITRAMFS_DEST" ]]; then
+  [[ -s "$INITRAMFS_DEST" ]] \
+    || error "$INITRAMFS_DEST is empty — no usable initramfs was produced."
+  success "Initramfs installed at $INITRAMFS_DEST"
 else
-  warn "No initramfs generator or source found — kernel may not boot without one."
+  warn "No initramfs was produced at $INITRAMFS_DEST — kernel may not boot without one."
 fi
 
 step "Updating bootloader"
 
 # Limine detection/update
+LIMINE_UPDATED=false
 if [[ -f /boot/limine.conf ]]; then
-  info "Detected Limine bootloader — updating /boot/limine.conf..."
   LIMINE_CFG="/boot/limine.conf"
   cp "$LIMINE_CFG" "${LIMINE_CFG}.bak"
   info "Backed up to ${LIMINE_CFG}.bak"
 
-  # Update kernel path
-  sed -i "s|kernel_path: boot():/vmlinuz-[^ ]*|kernel_path: boot():/vmlinuz-${NEW_VERSION}|g" "$LIMINE_CFG"
-  # Update initramfs path
-  sed -i "s|module_path: boot():/initramfs-[^ ]*\.img|module_path: boot():/initramfs-${NEW_VERSION}.img|g" "$LIMINE_CFG"
-  success "Limine config updated for kernel $NEW_VERSION."
+  # On Haliade OS /boot/limine.conf belongs to chronos: it regenerates the whole
+  # file and stamps it "do not hand-edit". chronos picks the newest vmlinuz-*
+  # in /boot, strips the prefix for the version, and then looks for
+  # /boot/initramfs-<that version>.img — exactly the pair installed above — so
+  # letting it do the work keeps the two from disagreeing. It also writes
+  # through a temp file, so a failure leaves the old config intact and editing
+  # in place stays a safe fallback.
+  if command -v chronos &>/dev/null; then
+    if chronos rewrite-limine 2>&1 | tee -a "$LOG_FILE"; then
+      success "Limine config regenerated by chronos for kernel $NEW_VERSION."
+      LIMINE_UPDATED=true
+    else
+      warn "chronos rewrite-limine failed — editing $LIMINE_CFG in place instead."
+    fi
+  fi
+
+  if ! $LIMINE_UPDATED; then
+    info "Detected Limine bootloader — updating $LIMINE_CFG..."
+    # Update ONLY the default (first) entry. A config regenerated by chronos
+    # has one entry per generation, each pinned to the kernel ITS snapshot
+    # has modules for; rewriting every entry to the newest kernel would boot
+    # older generations with a kernel whose modules are not in their root
+    # (no drivers, no network). The live entry is written first, so the first
+    # occurrence is the one to bump.
+    sed -i "0,/kernel_path:[[:space:]]*boot():\/vmlinuz-[^ ]*/{s|kernel_path: boot():/vmlinuz-[^ ]*|kernel_path: boot():/vmlinuz-${NEW_VERSION}|}" "$LIMINE_CFG"
+    sed -i "0,/module_path:[[:space:]]*boot():\/initramfs-[^ ]*\.img/{s|module_path: boot():/initramfs-[^ ]*\.img|module_path: boot():/initramfs-${NEW_VERSION}.img|}" "$LIMINE_CFG"
+    success "Limine config updated for kernel $NEW_VERSION."
+  fi
 fi
 
 # GRUB detection/update (fallback for non-Haliade distros)
@@ -358,6 +427,76 @@ if command -v grub-mkconfig &>/dev/null || command -v update-grub &>/dev/null; t
   success "GRUB config regenerated with Linux $NEW_VERSION entry."
 fi
 
+# ---------------------------------------------------------------------------
+# Kernel headers + out-of-tree module (DKMS) support for the new kernel.
+# Must run BEFORE SRC_DIR/TARBALL removal below.
+# ---------------------------------------------------------------------------
+HEADERS_SRC="/usr/src/linux-$NEW_VERSION"
+
+step "Preparing kernel headers at $HEADERS_SRC"
+rm -rf "$HEADERS_SRC"
+mkdir -p "$HEADERS_SRC" || warn "Cannot create $HEADERS_SRC — out-of-tree modules will not build for $NEW_VERSION"
+
+if [[ -f "$BUILD_DIR/$TARBALL" && -d "$HEADERS_SRC" ]]; then
+  # Fresh extract: the build tree is full of object files; DKMS only needs a
+  # *prepared* source tree, which keeps /usr/src at ~source size instead of
+  # several GB of .o files.
+  if tar -xf "$BUILD_DIR/$TARBALL" -C "$HEADERS_SRC" --strip-components=1 \
+       2>&1 | tee -a "$LOG_FILE" >/dev/null; then
+    cp "$SRC_DIR/.config" "$HEADERS_SRC/.config" 2>/dev/null \
+      || warn "Could not copy .config into headers tree"
+    if (cd "$HEADERS_SRC" \
+        && make olddefconfig >/dev/null 2>&1 \
+        && make modules_prepare 2>&1 | tee -a "$LOG_FILE" >/dev/null); then
+      success "Kernel headers prepared at $HEADERS_SRC"
+
+      # modules_install left /lib/modules/<ver>/build pointing into the
+      # temporary build dir that is about to be deleted — repoint it or
+      # every future DKMS/out-of-tree build gets a dangling symlink.
+      if [[ -d "/lib/modules/$NEW_VERSION" ]]; then
+        ln -sfn "$HEADERS_SRC" "/lib/modules/$NEW_VERSION/build"
+        success "build symlink now → /lib/modules/$NEW_VERSION/build → $HEADERS_SRC"
+      fi
+
+      # Rebuild registered DKMS packages (nvidia open/closed, vbox, ...) for
+      # the new kernel. Non-fatal: the kernel itself works without them, and
+      # a missing toolchain (gcc/dkms via zeta) should not fail the build.
+      if command -v dkms &>/dev/null; then
+        step "Rebuilding DKMS modules for $NEW_VERSION"
+        if dkms autoinstall -k "$NEW_VERSION" 2>&1 | tee -a "$LOG_FILE"; then
+          success "DKMS modules built for $NEW_VERSION"
+        else
+          warn "dkms autoinstall reported errors — check $LOG_FILE (install gcc/dkms via zeta if missing)"
+        fi
+      else
+        info "dkms not installed — skipping out-of-tree module rebuild"
+      fi
+    else
+      warn "modules_prepare failed — out-of-tree modules will not build for $NEW_VERSION"
+    fi
+  else
+    warn "Could not extract $BUILD_DIR/$TARBALL for headers — skipping DKMS support"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Snapshot this exact state (new kernel + rebuilt DKMS modules) as a fresh
+# btrfs generation via chronos, so the new kernel gets its own boot entry.
+# chronos pins each generation to the kernel ITS snapshot has modules for,
+# so existing generations keep the kernel they were captured with; this new
+# one is the upgrade. Optional: on systems without the btrfs @/@snapshots
+# layout (e.g. the live ISO) the call fails here — warn, the kernel itself
+# is already installed and bootable.
+# ---------------------------------------------------------------------------
+if command -v chronos &>/dev/null; then
+  step "Creating btrfs generation with kernel $NEW_VERSION"
+  if chronos create "kernel $NEW_VERSION" 2>&1 | tee -a "$LOG_FILE"; then
+    success "Generation created with kernel $NEW_VERSION (limine.conf updated)."
+  else
+    warn "chronos create failed — no new generation (not a chronos/btrfs system?)."
+  fi
+fi
+
 step "Cleaning up"
 cd "$BUILD_DIR" 2>/dev/null || true
 rm -rf "$SRC_DIR" 2>/dev/null || warn "Could not remove $SRC_DIR"
@@ -368,10 +507,9 @@ fi
 
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${RESET}"
-echo -e "${GREEN}${BOLD}║  Kernel $NEW_VERSION generated successfully.  ║${RESET}"
+echo -e "${GREEN}${BOLD}║  Kernel $NEW_VERSION generated successfully.         ║${RESET}"
 echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════╣${RESET}"
-echo -e "${GREEN}${BOLD}║  Requiring reboot to use this kernel                 ║${RESET}"
-echo -e "${GREEN}${BOLD}║    ${BOLD}reboot                                            ║${RESET}"
+echo -e "${GREEN}${BOLD}║  You can now reboot to use this kernel.              ║${RESET}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${RESET}"
 echo ""
-info "Full log saved to $LOG_FILE"
+info "logs have been saved to $LOG_FILE"

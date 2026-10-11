@@ -130,16 +130,77 @@ method is used in this order:
 
 If no method is available, the script warns and continues.
 
+Before generating, the script probes `/boot` by actually creating a file.
+`[[ -w /boot ]]` is not good enough for this: as root, `access(2)` reports
+success even on a read-only mount, so it would wave through the very failure it
+is meant to catch. If the probe fails the script stops with a message telling
+you to remount `/boot` read-write.
+
+`mkinitcpio` and `dracut` are given the output path directly, so they generate
+into `/boot/.initramfs-<kernel-release>.tmp.img` — a name that does not exist
+yet — and the result is moved into place afterwards. This matters because
+`mkinitcpio` validates the `-g` path before doing any work and, once that file
+already exists, only tests writability of the file itself; it never falls back
+to the parent directory. A stale image left behind by an earlier run therefore
+aborts generation with `Invalid option -g -- ... must be writable` even though
+`/boot` is perfectly writable. The temporary name is created in `/boot` rather
+than `/tmp` because these images are hundreds of megabytes and `/tmp` is
+normally a tmpfs; moving within the same filesystem also replaces the stale
+image atomically.
+
+`update-initramfs` and `kernel-install` choose their own output names and are
+therefore called as-is.
+
+Once the image is in place, the script verifies that it exists and is not empty,
+and stops with a clear error if it is not.
+
 ### 6. Update the bootloader
 
 For Limine, the script backs up `/boot/limine.conf` to
-`/boot/limine.conf.bak`, then replaces the kernel and initramfs paths with the
-new release.
+`/boot/limine.conf.bak`.
+
+On HaliadeOS that file belongs to `chronos`: it regenerates the whole file and
+marks it as not to be hand-edited. The script therefore runs
+`chronos rewrite-limine` when `chronos` is available, and logs its output.
+`chronos` pins each boot entry to the kernel its subvolume actually has modules
+for: the default entry follows the booted subvolume (the newest kernel after an
+upgrade) and every generation keeps the kernel it was captured with. The
+`vmlinuz-*` / `initramfs-<version>.img` pair installed above is therefore used
+by the default entry, and the two tools cannot disagree about which kernel is
+booted.
+
+`chronos` writes through a temporary file, so if it fails the existing config is
+left untouched. The script falls back to editing `/boot/limine.conf` in place,
+replacing the **default** entry's kernel and initramfs paths with the new
+release and leaving any generation entries untouched. That in-place edit is
+also the only path used when `chronos` is not installed.
 
 If GRUB tooling is present, the detected `grub.cfg` is backed up with a
 `.bak` suffix and regenerated with `grub-mkconfig` or `update-grub`.
 
-### 7. Clean up
+### 7. Snapshot the new kernel as a generation
+
+When `chronos` is available (Haliade OS), the script snapshots the freshly
+upgraded root as a new btrfs generation:
+
+```bash
+chronos create "kernel <version>"
+```
+
+so the new kernel gets its own Limine entry and rollback point. `chronos`
+pins every boot entry to the kernel its subvolume actually has modules for:
+existing generations keep the kernel they were captured with, and only the
+new generation — plus the live `@` entry — boot the new kernel. This is what
+keeps a rollback from booting a kernel whose modules are absent from the
+chosen generation (which would leave the machine with no drivers and no
+network).
+
+The step runs after the header/DKMS stage so the snapshot contains the newly
+rebuilt out-of-tree modules. It is optional: on systems without the btrfs
+`@`/`@snapshots` layout (for example the live ISO) the call fails and the
+script warns and continues — the kernel itself is already installed.
+
+### 8. Clean up
 
 After a successful installation, the extracted source directory, the downloaded
 archive, and its signature are removed from `BUILD_DIR`.
