@@ -1,13 +1,13 @@
-# HaliadeOS Genkernel
+# Haliade system Genkernel
 
-This repository contains the kernel generation script used by HaliadeOS
+This repository contains the kernel generation script used by Haliade system
 maintainers:
 
 ```text
 bin/genkernel
 ```
 
-It downloads the selected Linux kernel, applies the HaliadeOS defaults, builds
+It downloads the selected Linux kernel, applies the Haliade system defaults, builds
 and installs it, generates an initramfs, and updates the bootloader.
 
 ## Usage
@@ -89,7 +89,7 @@ The maintainer can then:
 2. run `make menuconfig`;
 3. replace it with `make tinyconfig`.
 
-The script subsequently applies the HaliadeOS defaults:
+The script subsequently applies the Haliade system defaults:
 
 - set `CONFIG_LOCALVERSION` to `-gen`;
 - disable module signing;
@@ -159,7 +159,7 @@ and stops with a clear error if it is not.
 For Limine, the script backs up `/boot/limine.conf` to
 `/boot/limine.conf.bak`.
 
-On HaliadeOS that file belongs to `chronos`: it regenerates the whole file and
+On Haliade system that file belongs to `chronos`: it regenerates the whole file and
 marks it as not to be hand-edited. The script therefore runs
 `chronos rewrite-limine` when `chronos` is available, and logs its output.
 `chronos` pins each boot entry to the kernel its subvolume actually has modules
@@ -180,7 +180,7 @@ If GRUB tooling is present, the detected `grub.cfg` is backed up with a
 
 ### 7. Snapshot the new kernel as a generation
 
-When `chronos` is available (Haliade OS), the script snapshots the freshly
+When `chronos` is available (Haliade system), the script snapshots the freshly
 upgraded root as a new btrfs generation:
 
 ```bash

@@ -252,7 +252,7 @@ case "$config_choice" in
     ;;
 esac
 
-# Apply Haliade OS defaults: disable signing, set localversion
+# Apply Haliade system defaults: disable signing, set localversion
 scripts/config --disable MODULE_SIG_ALL 2>/dev/null || true
 scripts/config --disable SYSTEM_TRUSTED_KEYS 2>/dev/null || true
 scripts/config --set-str SYSTEM_TRUSTED_KEYS "" 2>/dev/null || true
@@ -266,10 +266,82 @@ scripts/config --enable CONFIG_OVERLAY_FS 2>/dev/null || true
 # display from the earliest boot stage (matches amdgpu/i915 above)
 scripts/config --enable CONFIG_DRM_NOUVEAU 2>/dev/null || true
 
+# === Complete audio + microphone support (persistent defaults) ===
+# Critical audio/mic drivers are built-in (=y); the long tail is modules (=m).
+# --keep-case matters: scripts/config upper-cases symbol names by default and
+# sound has mixed-case symbols (e.g. SND_SOC_AMD_ACP3x).
+AUDIO_CRITICAL=(
+  SND_OSSEMUL SND_MIXER_OSS SND_PCM_OSS SND_CTL_INPUT_VALIDATION SND_UTIMER SND_SEQ_UMP
+  SND_PCSP SND_DUMMY SND_ALOOP SND_VIRMIDI SND_PCMTEST
+  SND_HDA_RECONFIG SND_HDA_INPUT_BEEP SND_HDA_PATCH_LOADER SND_HDA_CTL_DEV_ID
+  SND_HDA_ACPI SND_HDA_INTEL_HDMI_SILENT_STREAM
+  SND_HDA_CODEC_ANALOG SND_HDA_CODEC_SIGMATEL SND_HDA_CODEC_VIA SND_HDA_CODEC_CONEXANT
+  SND_HDA_CODEC_SENARYTECH SND_HDA_CODEC_CA0110 SND_HDA_CODEC_CA0132 SND_HDA_CODEC_CMEDIA
+  SND_HDA_CODEC_CM9825 SND_HDA_CODEC_SI3054 SND_HDA_CODEC_CIRRUS
+  SND_HDA_SCODEC_CS35L41_I2C SND_HDA_SCODEC_CS35L56_I2C SND_HDA_SCODEC_TAS2781_I2C
+  SND_USB_AUDIO
+  SOUNDWIRE SND_SOC_SOF_ACPI SND_SOC_DMIC SND_SOC_AC97_CODEC SND_SOC_HDA SND_SOC_BT_SCO
+  SND_SOC_INTEL_SKL_HDA_DSP_GENERIC_MACH SND_SOC_INTEL_AVS SND_SOC_INTEL_CATPT
+  SND_SST_ATOM_HIFI2_PLATFORM_PCI
+  SND_SOC_AMD_ACP_COMMON SND_SOC_AMD_ACP3x SND_SOC_AMD_ACP5x SND_SOC_AMD_ACP6x
+  SND_SOC_AMD_RENOIR SND_SOC_AMD_RPL_ACP6x SND_SOC_AMD_PS SND_SOC_SOF_AMD_TOPLEVEL
+  SND_SOC_SIMPLE_CARD SND_VIRTIO
+)
+for _audiosym in "${AUDIO_CRITICAL[@]}"; do
+  scripts/config --keep-case --enable "$_audiosym" 2>/dev/null || true
+done
+
+# Long tail: every other disabled audio symbol becomes a module, except the
+# non-x86 embedded platforms and SND_DEBUG (see AUDIO_EXCLUDE).
+AUDIO_EXCLUDE="^(SND_DEBUG|SND_SOC_FSL_|SND_SOC_IMX_|SND_SOC_XILINX_|SND_SOC_XTFPGA_|SND_SOC_MTK_|SND_SOC_MT6351|SND_SOC_MT6357|SND_SOC_MT6358|SND_SOC_MT6660|SND_SOC_MSM8916|SND_SOC_LPASS_|SND_BCM63XX|SND_SOC_ADI_AXI_|SND_SOC_STI|SND_SOC_CHV3|SND_I2S_HI6210|SND_DESIGNWARE_I2S|SND_SOC_TSCS42XX|SND_SOC_TSCS454)"
+for _audiosym in "${AUDIO_CRITICAL[@]}"; do
+  AUDIO_EXCLUDE="$AUDIO_EXCLUDE|^${_audiosym}$"
+done
+mapfile -t AUDIO_TAIL < <(grep -E "^# CONFIG_(SND|SOUND)[A-Z0-9_]* is not set" .config 2>/dev/null \
+  | sed -E "s/^# CONFIG_([A-Z0-9_]+) is not set/\1/" \
+  | grep -vE "$AUDIO_EXCLUDE" || true)
+for _audiosym in "${AUDIO_TAIL[@]}"; do
+  scripts/config --keep-case --module "$_audiosym" 2>/dev/null || true
+done
+
+# Buses that unlock more codecs (SPI + FireWire pro-audio) and the Intel
+# LPSS MFD plus regmap-SPI needed by SPI-attached and LPSS machine drivers.
+scripts/config --keep-case --enable SPI 2>/dev/null || true
+scripts/config --keep-case --enable SPI_MASTER 2>/dev/null || true
+scripts/config --keep-case --enable REGMAP_SPI 2>/dev/null || true
+scripts/config --keep-case --enable MFD_INTEL_LPSS 2>/dev/null || true
+scripts/config --keep-case --enable FIREWIRE 2>/dev/null || true
+scripts/config --keep-case --enable FIREWIRE_OHCI 2>/dev/null || true
+for _audiosym in SND_FIREWIRE SND_FIREWIRE_LIB SND_DICE SND_FIREWORKS SND_BEBOB SND_OXFW \
+                 SND_ISIGHT SND_SCS1X SND_FIREWIRE_DIGI00X SND_FIREWIRE_TASCAM SND_FIREWIRE_MOTU; do
+  scripts/config --keep-case --module "$_audiosym" 2>/dev/null || true
+done
+
 # scripts/config edits .config directly, so re-run the config machinery to
 # resolve anything it added or invalidated.
 make olddefconfig 2>&1 | tee -a "$LOG_FILE" >/dev/null \
   || error "Kernel configuration refresh failed."
+
+# Audio convergence pass: enable anything still off - bool selectors and
+# hidden children that the pass above + olddefconfig revealed (SoundWire
+# codecs, SOF/ACPI machine drivers, AMD/LPSS boards, ...). Iterate until the
+# number of disabled audio symbols stops changing; each pass is idempotent.
+AUDIO_EXCLUDE_B="^(SND_DEBUG|SND_SOC_FSL_|SND_SOC_IMX_|SND_SOC_XILINX_|SND_SOC_XTFPGA_|SND_SOC_MTK_|SND_SOC_MT6351|SND_SOC_MT6357|SND_SOC_MT6358|SND_SOC_MT6660|SND_SOC_MSM8916|SND_SOC_LPASS_|SND_BCM63XX|SND_SOC_ADI_AXI_|SND_SOC_STI|SND_SOC_CHV3|SND_I2S_HI6210|SND_DESIGNWARE_I2S|SND_SOC_TSCS42XX|SND_SOC_TSCS454)"
+haliade_audio_remain() {
+  local _audiosym
+  while IFS= read -r _audiosym; do
+    scripts/config --keep-case --enable "$_audiosym" 2>/dev/null || true
+  done < <(grep -E "^# CONFIG_(SND|SOUND)[A-Z0-9_]* is not set" .config 2>/dev/null \
+    | sed -E "s/^# CONFIG_([A-Z0-9_]+) is not set/\1/" \
+    | grep -vE "$AUDIO_EXCLUDE_B" || true)
+}
+for _audioiter in 1 2 3 4 5 6 7 8; do
+  _audiobefore=$(grep -cE "^# CONFIG_(SND|SOUND)[A-Z0-9_]* is not set" .config 2>/dev/null || echo 0)
+  haliade_audio_remain
+  make olddefconfig 2>&1 | tee -a "$LOG_FILE" >/dev/null || true
+  _audioafter=$(grep -cE "^# CONFIG_(SND|SOUND)[A-Z0-9_]* is not set" .config 2>/dev/null || echo 0)
+  [[ "$_audiobefore" == "$_audioafter" ]] && break
+done
 
 success "Kernel configured."
 
@@ -338,7 +410,7 @@ elif command -v kernel-install &>/dev/null; then
   kernel-install add "$NEW_VERSION" /boot/vmlinuz-"$NEW_VERSION" \
     || error "initramfs generation failed for $NEW_VERSION"
 elif [[ -d /tmp/initramfs_extract ]]; then
-  # Custom minimal initramfs rebuild (Haliade OS style)
+  # Custom minimal initramfs rebuild (Haliade system style)
   info "Rebuilding initramfs from /tmp/initramfs_extract..."
   ( cd /tmp/initramfs_extract && find . | cpio -o -H newc | gzip ) > "$INITRAMFS_TMP" \
     || { rm -f "$INITRAMFS_TMP"; error "initramfs rebuild failed."; }
@@ -371,7 +443,7 @@ if [[ -f /boot/limine.conf ]]; then
   cp "$LIMINE_CFG" "${LIMINE_CFG}.bak"
   info "Backed up to ${LIMINE_CFG}.bak"
 
-  # On Haliade OS /boot/limine.conf belongs to chronos: it regenerates the whole
+  # On Haliade system /boot/limine.conf belongs to chronos: it regenerates the whole
   # file and stamps it "do not hand-edit". chronos picks the newest vmlinuz-*
   # in /boot, strips the prefix for the version, and then looks for
   # /boot/initramfs-<that version>.img — exactly the pair installed above — so
