@@ -1,5 +1,9 @@
 # Haliade system Genkernel
 
+# This tool was mostly written by AI! hense why the quality is so shitty
+# still, we're gradually rewriting it.
+
+
 This repository contains the kernel generation script used by Haliade system
 maintainers:
 
@@ -53,8 +57,8 @@ longterm `.tar.xz` files are all handled without special cases.
 
 An archive already present in `BUILD_DIR` is reused, but only after it is
 confirmed to be a complete tarball that unpacks into the expected
-`linux-<version>` directory. Anything else — a truncated download, an HTML
-error page, or a leftover from a different version — is discarded and fetched
+`linux-<version>` directory. Anything else (a truncated download, an HTML
+error page, or a leftover from a different version) is discarded and fetched
 again.
 
 When a detached signature is published, the script reads the signing key ID out
@@ -137,8 +141,8 @@ is meant to catch. If the probe fails the script stops with a message telling
 you to remount `/boot` read-write.
 
 `mkinitcpio` and `dracut` are given the output path directly, so they generate
-into `/boot/.initramfs-<kernel-release>.tmp.img` — a name that does not exist
-yet — and the result is moved into place afterwards. This matters because
+into `/boot/.initramfs-<kernel-release>.tmp.img` (a name that does not exist
+yet), and the result is moved into place afterwards. This matters because
 `mkinitcpio` validates the `-g` path before doing any work and, once that file
 already exists, only tests writability of the file itself; it never falls back
 to the parent directory. A stale image left behind by an earlier run therefore
@@ -190,7 +194,7 @@ chronos create "kernel <version>"
 so the new kernel gets its own Limine entry and rollback point. `chronos`
 pins every boot entry to the kernel its subvolume actually has modules for:
 existing generations keep the kernel they were captured with, and only the
-new generation — plus the live `@` entry — boot the new kernel. This is what
+new generation (plus the live `@` entry) boot the new kernel. This is what
 keeps a rollback from booting a kernel whose modules are absent from the
 chosen generation (which would leave the machine with no drivers and no
 network).
@@ -198,7 +202,7 @@ network).
 The step runs after the header/DKMS stage so the snapshot contains the newly
 rebuilt out-of-tree modules. It is optional: on systems without the btrfs
 `@`/`@snapshots` layout (for example the live ISO) the call fails and the
-script warns and continues — the kernel itself is already installed.
+script warns and continues: the kernel itself is already installed.
 
 ### 8. Clean up
 

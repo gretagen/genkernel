@@ -25,6 +25,8 @@ while [[ $# -gt 0 ]]; do
       JOBS="$2"; shift 2
       ;;
     -h|--help)
+      echo "genkernel | custom kernel builder for the Haliade system"
+      echo
       echo "Usage: genkernel [--dry-run] [--jobs N]"
       exit 0
       ;;
@@ -40,7 +42,7 @@ fi
 mkdir -p "$(dirname "$LOG_FILE")"
 echo "=== Kernel generation started $(date) ===" >> "$LOG_FILE"
 
-info "Genkernel : Custom kernels, made easy."
+info "Genkernel: Custom kernels, made easy."
 
 
 step "Fetching latest kernel versions"
@@ -161,10 +163,10 @@ tarball_matches() {
 cd "$BUILD_DIR" || error "Cannot enter $BUILD_DIR."
 
 if tarball_matches "$TARBALL" "$SRC_NAME"; then
-  info "Tarball already present and valid — skipping download."
+  info "Tarball already present and valid, skipping download."
 else
   if [[ -e "$TARBALL" ]]; then
-    warn "Cached $TARBALL is not a usable $SRC_NAME archive — removing it."
+    warn "Cached $TARBALL is not a usable $SRC_NAME archive, removing it."
     rm -f "$TARBALL"
   fi
   info "Downloading from $DOWNLOAD_URL"
@@ -187,23 +189,23 @@ if $SIGNED; then
     info "Importing signing key $KEYID from keyserver..."
     curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$KEYID" \
       | gpg --import 2>&1 | tee -a "$LOG_FILE" \
-      || warn "Could not import signing key — verification will probably fail."
+      || warn "Could not import signing key: verification will probably fail."
   fi
 
   info "Verifying GPG signature..."
   if gpg --verify "$SIGNATURE" "$TARBALL" 2>&1 | tee -a "$LOG_FILE"; then
     success "Signature OK."
   else
-    warn "GPG verification failed — continuing anyway. See $LOG_FILE for details."
+    warn "GPG verification failed: continuing anyway. See $LOG_FILE for details."
   fi
 else
-  info "No detached signature published for $LATEST — skipping verification."
+  info "No detached signature published for $LATEST, skipping verification."
 fi
 
 step "Extracting $SRC_DIR"
 
 if [[ -d "$SRC_DIR" ]]; then
-  info "Source directory already exists — skipping extraction."
+  info "Source directory already exists, skipping extraction."
 else
   info "Extracting (this may take a minute)..."
   tar -xf "$TARBALL" -C "$BUILD_DIR" || error "Extraction failed."
@@ -217,7 +219,7 @@ cd "$SRC_DIR" || error "Cannot enter $SRC_DIR."
 
 RUNNING_CONFIG="/boot/config-${CURRENT}"
 # Inside a chroot of the target rootfs, uname -r (and thus $CURRENT) reports
-# the *host* kernel, whose config is not in the tree — fall back to the
+# the *host* kernel, whose config is not in the tree: fall back to the
 # newest config present so the target's own configuration is preserved
 # instead of silently starting over from defconfig.
 if [[ ! -f "$RUNNING_CONFIG" ]]; then
@@ -228,15 +230,15 @@ if [[ -n "$RUNNING_CONFIG" && -f "$RUNNING_CONFIG" ]]; then
   cp "$RUNNING_CONFIG" .config
   make olddefconfig
 else
-  info "No existing config found — using defconfig as base."
+  info "No existing config found: using defconfig as base."
   make defconfig
 fi
 
 echo ""
 echo -e "${BOLD}Kernel configuration:${RESET}"
-echo "  1) skip — keep current config as-is"
-echo "  2) menuconfig — interactive ncurses menu"
-echo "  3) tinyconfig — minimal configuration"
+echo "  1) skip: keep current config as-is"
+echo "  2) menuconfig: interactive ncurses menu"
+echo "  3) tinyconfig: minimal configuration"
 echo ""
 read -rp "Choice [1/2/3]: " config_choice
 
@@ -266,7 +268,7 @@ scripts/config --enable CONFIG_OVERLAY_FS 2>/dev/null || true
 # display from the earliest boot stage (matches amdgpu/i915 above)
 scripts/config --enable CONFIG_DRM_NOUVEAU 2>/dev/null || true
 
-# === Complete audio + microphone support (persistent defaults) ===
+# Complete audio + microphone support (persistent defaults)
 # Critical audio/mic drivers are built-in (=y); the long tail is modules (=m).
 # --keep-case matters: scripts/config upper-cases symbol names by default and
 # sound has mixed-case symbols (e.g. SND_SOC_AMD_ACP3x).
@@ -373,11 +375,11 @@ cp -v .config /boot/config-"$NEW_VERSION" 2>/dev/null || true
 step "Installing initramfs"
 INITRAMFS_DEST="/boot/initramfs-${NEW_VERSION}.img"
 
-[[ -d /boot ]] || error "/boot does not exist — cannot install $INITRAMFS_DEST."
+[[ -d /boot ]] || error "/boot does not exist: cannot install $INITRAMFS_DEST."
 
 # Generators that take an explicit output path validate it before doing any
 # work, and mkinitcpio's check only tests -w on the target file when that file
-# already exists — it never falls back to the parent directory. A stale image
+# already exists; it never falls back to the parent directory. A stale image
 # left behind by an earlier run therefore aborts generation even though /boot
 # itself is perfectly writable. Generate under a name that does not exist yet,
 # then move it into place, which also replaces the stale file atomically
@@ -390,7 +392,7 @@ INITRAMFS_TMP="/boot/.initramfs-${NEW_VERSION}.tmp.img"
 # would wave through the exact failure it is meant to catch.
 rm -f "$INITRAMFS_TMP"
 : > "$INITRAMFS_TMP" 2>/dev/null \
-  || error "/boot is not writable (cannot create $INITRAMFS_TMP) — remount it read-write and retry."
+  || error "/boot is not writable (cannot create $INITRAMFS_TMP): remount it read-write and retry."
 rm -f "$INITRAMFS_TMP"
 
 # Try distro-specific initramfs generators first
@@ -428,10 +430,10 @@ fi
 
 if [[ -e "$INITRAMFS_DEST" ]]; then
   [[ -s "$INITRAMFS_DEST" ]] \
-    || error "$INITRAMFS_DEST is empty — no usable initramfs was produced."
+    || error "$INITRAMFS_DEST is empty: no usable initramfs was produced."
   success "Initramfs installed at $INITRAMFS_DEST"
 else
-  warn "No initramfs was produced at $INITRAMFS_DEST — kernel may not boot without one."
+  warn "No initramfs was produced at $INITRAMFS_DEST, kernel may not boot without one."
 fi
 
 step "Updating bootloader"
@@ -446,7 +448,7 @@ if [[ -f /boot/limine.conf ]]; then
   # On Haliade system /boot/limine.conf belongs to chronos: it regenerates the whole
   # file and stamps it "do not hand-edit". chronos picks the newest vmlinuz-*
   # in /boot, strips the prefix for the version, and then looks for
-  # /boot/initramfs-<that version>.img — exactly the pair installed above — so
+  # /boot/initramfs-<that version>.img, exactly the pair installed above, so
   # letting it do the work keeps the two from disagreeing. It also writes
   # through a temp file, so a failure leaves the old config intact and editing
   # in place stays a safe fallback.
@@ -455,12 +457,12 @@ if [[ -f /boot/limine.conf ]]; then
       success "Limine config regenerated by chronos for kernel $NEW_VERSION."
       LIMINE_UPDATED=true
     else
-      warn "chronos rewrite-limine failed — editing $LIMINE_CFG in place instead."
+      warn "chronos rewrite-limine failed: editing $LIMINE_CFG in place instead."
     fi
   fi
 
   if ! $LIMINE_UPDATED; then
-    info "Detected Limine bootloader — updating $LIMINE_CFG..."
+    info "Detected Limine bootloader, updating $LIMINE_CFG..."
     # Update ONLY the default (first) entry. A config regenerated by chronos
     # has one entry per generation, each pinned to the kernel ITS snapshot
     # has modules for; rewriting every entry to the newest kernel would boot
@@ -499,15 +501,13 @@ if command -v grub-mkconfig &>/dev/null || command -v update-grub &>/dev/null; t
   success "GRUB config regenerated with Linux $NEW_VERSION entry."
 fi
 
-# ---------------------------------------------------------------------------
 # Kernel headers + out-of-tree module (DKMS) support for the new kernel.
 # Must run BEFORE SRC_DIR/TARBALL removal below.
-# ---------------------------------------------------------------------------
 HEADERS_SRC="/usr/src/linux-$NEW_VERSION"
 
 step "Preparing kernel headers at $HEADERS_SRC"
 rm -rf "$HEADERS_SRC"
-mkdir -p "$HEADERS_SRC" || warn "Cannot create $HEADERS_SRC — out-of-tree modules will not build for $NEW_VERSION"
+mkdir -p "$HEADERS_SRC" || warn "Cannot create $HEADERS_SRC: out-of-tree modules will not build for $NEW_VERSION"
 
 if [[ -f "$BUILD_DIR/$TARBALL" && -d "$HEADERS_SRC" ]]; then
   # Fresh extract: the build tree is full of object files; DKMS only needs a
@@ -523,11 +523,11 @@ if [[ -f "$BUILD_DIR/$TARBALL" && -d "$HEADERS_SRC" ]]; then
       success "Kernel headers prepared at $HEADERS_SRC"
 
       # modules_install left /lib/modules/<ver>/build pointing into the
-      # temporary build dir that is about to be deleted — repoint it or
+      # temporary build dir that is about to be deleted: repoint it or
       # every future DKMS/out-of-tree build gets a dangling symlink.
       if [[ -d "/lib/modules/$NEW_VERSION" ]]; then
         ln -sfn "$HEADERS_SRC" "/lib/modules/$NEW_VERSION/build"
-        success "build symlink now → /lib/modules/$NEW_VERSION/build → $HEADERS_SRC"
+        success "build symlink now -> /lib/modules/$NEW_VERSION/build -> $HEADERS_SRC"
       fi
 
       # Rebuild registered DKMS packages (nvidia open/closed, vbox, ...) for
@@ -538,34 +538,32 @@ if [[ -f "$BUILD_DIR/$TARBALL" && -d "$HEADERS_SRC" ]]; then
         if dkms autoinstall -k "$NEW_VERSION" 2>&1 | tee -a "$LOG_FILE"; then
           success "DKMS modules built for $NEW_VERSION"
         else
-          warn "dkms autoinstall reported errors — check $LOG_FILE (install gcc/dkms via zeta if missing)"
+          warn "dkms autoinstall reported errors: check $LOG_FILE (install gcc/dkms via zeta if missing)"
         fi
       else
-        info "dkms not installed — skipping out-of-tree module rebuild"
+        info "dkms not installed, skipping out-of-tree module rebuild"
       fi
     else
-      warn "modules_prepare failed — out-of-tree modules will not build for $NEW_VERSION"
+      warn "modules_prepare failed: out-of-tree modules will not build for $NEW_VERSION"
     fi
   else
-    warn "Could not extract $BUILD_DIR/$TARBALL for headers — skipping DKMS support"
+    warn "Could not extract $BUILD_DIR/$TARBALL for headers: skipping DKMS support"
   fi
 fi
 
-# ---------------------------------------------------------------------------
 # Snapshot this exact state (new kernel + rebuilt DKMS modules) as a fresh
 # btrfs generation via chronos, so the new kernel gets its own boot entry.
 # chronos pins each generation to the kernel ITS snapshot has modules for,
 # so existing generations keep the kernel they were captured with; this new
 # one is the upgrade. Optional: on systems without the btrfs @/@snapshots
-# layout (e.g. the live ISO) the call fails here — warn, the kernel itself
+# layout (e.g. the live ISO) the call fails here: warn, the kernel itself
 # is already installed and bootable.
-# ---------------------------------------------------------------------------
 if command -v chronos &>/dev/null; then
   step "Creating btrfs generation with kernel $NEW_VERSION"
   if chronos create "kernel $NEW_VERSION" 2>&1 | tee -a "$LOG_FILE"; then
     success "Generation created with kernel $NEW_VERSION (limine.conf updated)."
   else
-    warn "chronos create failed — no new generation (not a chronos/btrfs system?)."
+    warn "chronos create failed: no new generation (not a chronos/btrfs system?)."
   fi
 fi
 
